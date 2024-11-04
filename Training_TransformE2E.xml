@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Export generator="IRIS" version="26">
+<Class name="Training.TransformE2E">
+<Description>
+Diff. file formats to FHIR</Description>
+<Super>Ens.BusinessProcessBPL</Super>
+<TimeCreated>66846,64297.9078299</TimeCreated>
+
+<XData name="BPLError">
+<Description>
+This BPLError block indicates that a BPL Diagram 
+containing errors was saved.
+To correct this class:
+* Open it using the Studio BPL Editor,
+* Correct the errors, and,
+* Save the diagram.
+Do not edit the contents of the BPLError block
+or you may lose your diagram.</Description>
+<Data><![CDATA[
+<diagram Name="Training.TransformE2E" Width="2000" Height="2000" Layout="automatic" Language="objectscript" Request="Ens.Request" Response="Ens.Response" LastModified="" Version="" Includes="" ShowAnnotation="0">
+<annotation>Diff. file formats to FHIR</annotation>
+<shape _index="0" _Type="start" Name="" xPos="1034" yPos="117" />
+<shape _index="1" _Type="end" Name="" xPos="203" yPos="1199" />
+<shape _index="2" _Type="assign" Name="Message Object Type" xPos="1036" yPos="255" Action="" Key="" Property="assign" Value="" />
+<shape _index="3" _Type="switch" Name="Transform Flow" xPos="1036" yPos="371" />
+<shape _index="4" _Type="join" Name="" xPos="1037" yPos="1113" />
+<shape _index="5" _Type="trace" Name="object type" xPos="441" yPos="548" Value="" />
+<shape _index="6" _Type="assign" Name="Transform CDA to SDA" xPos="443" yPos="653" Action="" Key="" Property="" Value="" />
+<shape _index="7" _Type="assign" Name="Package stream container" xPos="442" yPos="749" Action="" Key="" Property="" Value="" />
+<shape _index="8" _Type="call" Name="Dispach to Target" xPos="443" yPos="852" Async="1" Target="" Timeout="" >
+<request type='Ens.Request' />
+<response type='Ens.Response' />
+</shape>
+<shape _index="9" _Type="trace" Name="object type" xPos="1372" yPos="550" Value="" />
+<shape _index="10" _Type="trace" Name="object type" xPos="813" yPos="549" Value="" />
+<shape _index="11" _Type="trace" Name="object type" xPos="1777" yPos="549" Value="" />
+<shape _index="12" _Type="assign" Name="Transform HL7 V2 to SDA" xPos="814" yPos="651" Action="" Key="" Property="" Value="" />
+<shape _index="13" _Type="assign" Name="Package stream container" xPos="814" yPos="753" Action="" Key="" Property="" Value="" />
+<shape _index="14" _Type="assign" Name="Generate SDA Stream" xPos="1372" yPos="752" Action="" Key="" Property="" Value="" />
+<shape _index="15" _Type="assign" Name="Generate SDA Stream" xPos="1778" yPos="760" Action="" Key="" Property="" Value="" />
+<shape _index="16" _Type="call" Name="Dispach to Target" xPos="814" yPos="852" Async="1" Target="" Timeout="" >
+<request type='Ens.Request' />
+<response type='Ens.Response' />
+</shape>
+<shape _index="17" _Type="assign" Name="Package stream container" xPos="1372" yPos="852" Action="" Key="" Property="" Value="" />
+<shape _index="18" _Type="assign" Name="Package stream container" xPos="1778" yPos="868" Action="" Key="" Property="" Value="" />
+<shape _index="19" _Type="call" Name="Dispach to Target" xPos="1778" yPos="983" Async="1" Target="" Timeout="" >
+<request type='Ens.Request' />
+<response type='Ens.Response' />
+</shape>
+<shape _index="20" _Type="call" Name="Dispach to Target" xPos="1372" yPos="951" Async="1" Target="" Timeout="" >
+<request type='Ens.Request' />
+<response type='Ens.Response' />
+</shape>
+<shape _index="21" _Type="transform" Name="Transform CSV to SDA" xPos="1373" yPos="660" Class="" Source="" Target="" />
+<shape _index="22" _Type="transform" Name="Transform XML to SDA" xPos="1778" yPos="655" Class="" Source="" Target="" />
+<connection _Type="connector" Name="" from="0" to="2"/>
+<connection _Type="connector" Name="" from="2" to="3"/>
+<connection _Type="connector" Name="default" from="3" to="4" ConnectType="case" Condition=""/>
+<connection _Type="connector" Name="" from="3" to="5" ConnectType="case" Condition=""/>
+<connection _Type="connector" Name="" from="3" to="9" ConnectType="case" Condition=""/>
+<connection _Type="connector" Name="" from="3" to="10" ConnectType="case" Condition=""/>
+<connection _Type="connector" Name="" from="3" to="11" ConnectType="case" Condition=""/>
+<connection _Type="connector" Name="" from="4" to="4"/>
+<connection _Type="connector" Name="" from="5" to="6"/>
+<connection _Type="connector" Name="" from="6" to="7"/>
+<connection _Type="connector" Name="" from="7" to="8"/>
+<connection _Type="connector" Name="" from="8" to="4"/>
+<connection _Type="connector" Name="" from="9" to="21"/>
+<connection _Type="connector" Name="" from="10" to="12"/>
+<connection _Type="connector" Name="" from="11" to="22"/>
+<connection _Type="connector" Name="" from="12" to="13"/>
+<connection _Type="connector" Name="" from="13" to="16"/>
+<connection _Type="connector" Name="" from="14" to="17"/>
+<connection _Type="connector" Name="" from="15" to="18"/>
+<connection _Type="connector" Name="" from="16" to="4"/>
+<connection _Type="connector" Name="" from="17" to="20"/>
+<connection _Type="connector" Name="" from="18" to="19"/>
+<connection _Type="connector" Name="" from="19" to="4"/>
+<connection _Type="connector" Name="" from="20" to="4"/>
+<connection _Type="connector" Name="" from="21" to="14"/>
+<connection _Type="connector" Name="" from="22" to="15"/>
+</diagram>
+]]></Data>
+</XData>
+</Class>
+</Export>
