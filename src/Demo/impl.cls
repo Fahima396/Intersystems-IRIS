@@ -1,6 +1,6 @@
 /// Patient update.<br/>
 /// Business logic class defined by OpenAPI in Demo.spec<br/>
-/// Created Dec 5, 2023 10:38:36
+/// Updated Aug 27, 2025 17:50:32
 Class Demo.impl Extends %REST.Impl [ ProcedureBlock ]
 {
 
@@ -8,7 +8,8 @@ Class Demo.impl Extends %REST.Impl [ ProcedureBlock ]
 Parameter ExposeServerExceptions = 0;
 
 /// This operation allows you to check if you have acces to Ensemble. <br> - <b>Operate it only in develeopment!</b><br> - It can be operated from a browser as well. <br> - It should show you the IP you are connected from
-ClassMethod HelloTest() As %DynamicObject
+/// WARNING: This method's signature has changed.
+ClassMethod HelloTest() As %Stream.Object
 {
 	Do ..%SetStatusCode(200)
     Quit "Welcome!"

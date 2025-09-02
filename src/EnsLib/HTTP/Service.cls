@@ -1,4 +1,4 @@
-/* Copyright (c) 2023 by InterSystems Corporation.
+/* Copyright (c) 2025 by InterSystems Corporation.
    Cambridge, Massachusetts, U.S.A.  All rights reserved.
    Confidential property of InterSystems Corporation. */
 
@@ -26,6 +26,11 @@ Property EnableStandardRequests As %Boolean [ InitialExpression = 1 ];
 /// For passthrough (generic) this might need to be checked so that the CSP Gateway does not convert.<br>
 /// If %response.NoCharSetConvert is set to true in custom code that will take precedence over this property being false.
 Property CSPNoCharSetConvert As %Boolean [ InitialExpression = 0 ];
+
+/// When receiving via the CSP Gateway if the request's Content-Type header
+/// contains a charset (e.g. charset=utf-8), it is normally not applied. <br>
+/// Enable this setting to apply the charset provided by the request header.
+Property CSPHeaderCharsetConvert As %Boolean [ InitialExpression = 0 ];
 
 Parameter SETTINGS As %String = "EnableStandardRequests:Connection";
 
@@ -97,8 +102,8 @@ ClassMethod OnPage() As %Status [ Internal, ServerOnly = 1 ]
 	If $$$ISOK(tSC) {
 		$$$sysTRACE("Processing HTTP request "_tURL)
 		Set body=%request.Content
-		If '$IsObject(body) { 
-			Set stream=##class(%Stream.GlobalCharacter).%New()  Do stream.Write(body)  Set body=stream
+		If '$IsObject(body) {
+			Set stream=##class(%GlobalCharacterStream).%New()  Do stream.Write(body)  Set body=stream
 		} ElseIf ..#REMOVECSPATTRIBS {
 			Try { Do body.SetAttributeList("") } Catch {}
 		}
@@ -110,18 +115,20 @@ ClassMethod OnPage() As %Status [ Internal, ServerOnly = 1 ]
 				Set tSC = ..restoreFormEncoded(body)
 				If $$$ISERR(tSC) Quit
 			}
-				
-			Set tSC=..addAttributesToBody(.body)
+
+			Set tSC=..addAttributesToBody(.body, tInstance.CSPHeaderCharsetConvert)
 			If $$$ISERR(tSC) Quit
 			Set body.Attributes("URL")=tURL
 			Set body.Attributes("CSPApplication")=%request.Application
 			Set body.Attributes("EnsConfigName")=tConfigName
-			
-			/*	Look for any multipart and put back into body. 
+
+			/*	Look for any multipart and put back into body.
 				Do after addAttributesToBody in order to have content-type attribute
+				Possible that only form key value pairs sent and hence need to retrieve
+				from Data array
 			*/
-			If (%request.NextMimeData("")'="") {
-				Set tSC = ..restoreMultipart(body) 
+			If (%request.NextMimeData("")'="")||(($ZCVT(%request.ContentType,"L")["multipart")&&($Data(%request.Data))) {
+				Set tSC = ..restoreMultipart(body)
 				If $$$ISERR(tSC) Quit
 			}
 		} Catch { Set tSC = $$$SystemError }
@@ -190,7 +197,7 @@ ClassMethod OnPage() As %Status [ Internal, ServerOnly = 1 ]
 }
 
 /// If called from CSP OnPage and not from Adapter, get attributes from the %request object
-ClassMethod addAttributesToBody(ByRef pStream As %Stream.Object) As %Status [ Internal ]
+ClassMethod addAttributesToBody(ByRef pStream As %Stream.Object, pApplyCharset As %Boolean = 0) As %Status [ Internal ]
 {
 	Set tSC= $$$OK
 	Try {
@@ -230,7 +237,7 @@ ClassMethod addAttributesToBody(ByRef pStream As %Stream.Object) As %Status [ In
 				Set tAttrAndVal = $P(tRawHeaders,$C(13,10),tC)
 				Set attr = $ZSTRIP($P(tAttrAndVal,":",1),"<>W"), attrVal = $ZSTRIP($P(tAttrAndVal,":",2,*),"<>W")
 				Set lwrattr = $ZCVT(attr,"L")
-				If (attr'=""),(lwrattr'="url"),(lwrattr'="version") {							
+				If (attr'=""),(lwrattr'="url"),(lwrattr'="version") {
 					If '((lwrattr="transfer-encoding")&&($ZCVT(attrVal,"L")="chunked")),'((lwrattr="content-encoding")&&($ZCVT(attrVal,"L")="gzip")) {
 						Set:..#TOLOWERHEADERVARS attr=lwrattr
 						Set:'$D(lwrattrs(lwrattr)) pStream.Attributes(attr)=attrVal, lwrattrs(lwrattr)=""
@@ -243,7 +250,7 @@ ClassMethod addAttributesToBody(ByRef pStream As %Stream.Object) As %Status [ In
 					}
 				}
 			}
-		} Else {	
+		} Else {
 			Set tattrH=$O(%request.CgiEnvs("HTTP_"))
 			While $E(tattrH,1,5)="HTTP_" {
 				If tattrH'="HTTP_URL",tattrH'="HTTP_VERSION" {
@@ -310,6 +317,21 @@ ClassMethod addAttributesToBody(ByRef pStream As %Stream.Object) As %Status [ In
 		}
 		Set pStream.Attributes("CharEncoding")=tCharset
 		Set pStream.Attributes("TranslationTable")=tTable
+
+		// If not RAW, apply the CharSet convertion
+		// Charset is provided by the Content-Type header, not the inbound adapter
+		If pApplyCharset && ("RAW"'=tTable) {
+			// In order to resolve the correct Type field in the HTTPMessage,
+			// the correct stream type is needed
+			Set tStream = ##class(%GlobalCharacterStream).%New()  $$$ASSERT($IsObject(tStream))
+			Set tSC = tStream.CopyFrom(pStream)
+			Return:$$$ISERR(tSC) tSC
+			Merge tStream.Attributes = pStream.Attributes
+			Set pStream = tStream
+
+			Set tSC = ##class(EnsLib.HTTP.InboundAdapter).ApplyCharset(pStream, tTable)
+			Return:$$$ISERR(tSC) tSC
+		}
 	} Catch {
 		Set tSC = $$$EnsSystemError
 	}
@@ -365,12 +387,15 @@ ClassMethod restoreMultipart(ByRef pBody As %Stream.Object = "", Output pBoundar
 			Set tKey = "CONTENT-TYPE"
 		}
 		Set pBoundary = "", tCount = 0
-	
+
 		If (tKey'="") {
 			Set tBoundaryCT = pBody.GetAttribute(tKey)
 			Set tBoundPos = $F($ZCVT(tBoundaryCT,"L"),"boundary")
 			If (tBoundPos>0) {
-				Set pBoundary = $ZSTRIP($P($P($E(tBoundaryCT,tBoundPos,*),"=",2),";"),"<>W")
+				#; need to remove double quotes since these are not included when used 
+				#; to recreate the multipart body with boundary encapsulation.
+				#; Example- Content-Type: multipart/form-data; boundary="----=_Part_0_1348917575.1714179502564"
+				Set pBoundary = $ZSTRIP($P($P($E(tBoundaryCT,tBoundPos,*),"=",2,*),";"),"<>W",$C(34))
 			}
 		}
 		/* Put back form from .Data array */
@@ -388,7 +413,7 @@ ClassMethod restoreMultipart(ByRef pBody As %Stream.Object = "", Output pBoundar
 				Do pBody.WriteLine()
 				Do pBody.Write(tDataValue)
 				Set tPos=$O(tDataPairs(tPos),1,tLBVal)
-			}	
+			}
 		}
 		/* Put back MimeData */
 		Set tMimeName = %request.NextMimeData("")
@@ -411,7 +436,8 @@ ClassMethod restoreMultipart(ByRef pBody As %Stream.Object = "", Output pBoundar
 						For i=1:1:len {
 							Set header=$piece(headers,$c(10),i)
 							Set name=$zstrip($piece(header,":",1),"<>W")
-							Set value=$zstrip($piece(header,":",2,len),"<>W")
+							#; Only expect 1 : on each line but take to end of header line
+							Set value=$zstrip($piece(header,":",2,*),"<>W")
 							Do pBody.WriteLine(name_": "_value)
 						}
 					}
@@ -451,7 +477,7 @@ ClassMethod restoreFormEncoded(pBody As %Stream.Object = "") As %Status
 		Set tSC = ..findDataNotInQuery(.tDataPairs)
 		If $$$ISERR(tSC) Quit
 		If $D(tDataPairs) {
-			Set tPos=$O(tDataPairs(""),1,tLBVal), tFirst=1	
+			Set tPos=$O(tDataPairs(""),1,tLBVal), tFirst=1
 			While (tPos'="") {
 				Set tDataName = $LG(tLBVal,1)
 				Set tDataValue = $G(%request.Data(tDataName,$LG(tLBVal,2)))
@@ -465,7 +491,7 @@ ClassMethod restoreFormEncoded(pBody As %Stream.Object = "") As %Status
 					Do pBody.Write($zconvert(tDataValue,"O","URL"))
 				}
 				Set tPos=$O(tDataPairs(tPos),1,tLBVal)
-			}	
+			}
 		}
 	} Catch {
 		Set tSC = $$$SystemError

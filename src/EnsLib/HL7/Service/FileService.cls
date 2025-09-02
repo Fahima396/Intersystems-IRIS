@@ -1,4 +1,4 @@
-/* Copyright (c) 2023 by InterSystems Corporation.
+/* Copyright (c) 2025 by InterSystems Corporation.
    Cambridge, Massachusetts, U.S.A.  All rights reserved.
    Confidential property of InterSystems Corporation. */
 
@@ -8,7 +8,7 @@ Class EnsLib.HL7.Service.FileService Extends EnsLib.HL7.Service.Standard [ Class
 Parameter ADAPTER = "EnsLib.File.InboundAdapter";
 
 /// ConfigName(s) of the operations or processes to which reply (e.g. ACK) messages should be forwarded.
-Property AckTargetConfigNames As %String;
+Property AckTargetConfigNames As %String(MAXLEN = 1000);
 
 Parameter SETTINGS = "AckTargetConfigNames:Basic:selector?multiSelect=1&context={Ens.ContextSearch/ProductionItems?targets=1&productionName=@productionId}";
 

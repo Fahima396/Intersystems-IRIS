@@ -1,5 +1,5 @@
 /// Business logic class defined by OpenAPI in HelloWorld.spec<br/>
-/// Updated Jan 22, 2024 10:54:08
+/// Updated Aug 27, 2025 17:54:03
 Class HelloWorld.impl Extends %REST.Impl [ ProcedureBlock ]
 {
 

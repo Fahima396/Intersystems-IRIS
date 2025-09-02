@@ -1,3 +1,5 @@
+Include HS.FHIRServer
+
 Class HS.FHIR.DTL.Util.API.Transform.SDA3ToFHIR Extends %RegisteredObject
 {
 
@@ -7,13 +9,13 @@ Class HS.FHIR.DTL.Util.API.Transform.SDA3ToFHIR Extends %RegisteredObject
 /// will be the entire contents of the Container, represented as FHIR.
 Property bundle As %DynamicObject [ Calculated ];
 
-Property schema As HS.FHIRServer.Schema [ Calculated ];
+Property schema As HS.FHIRMeta.API [ Calculated ];
 
 Property fhirVersion As %String [ Calculated ];
 
 Property %bundle As %DynamicObject [ Private ];
 
-Property %schema As HS.FHIRServer.Schema [ Private ];
+Property %schema As HS.FHIRMeta.API [ Private ];
 
 Property %fhirVersion As %String [ Private ];
 
@@ -25,9 +27,21 @@ Property %patientId As %String [ Private ];
 /// resource id
 Property %resourceIds As %String [ MultiDimensional, Private ];
 
+/// Used to map SdaIDs to new IDs in FHIR
+Property idMap As %DynamicObject [ Private ];
+
+/// Used to map SdaIDs to Types in FHIR
+Property typeMap As %DynamicObject [ Private ];
+
 /// Maps the resource type and id to the actual resource for O(1) lookup when
 /// resolving certain references
 Property %resourceIndex [ MultiDimensional, Private ];
+
+/// Provenance resource set-aside queue.  Cannot populate target(s) until all streamlets have been transformed.
+Property %provenance [ MultiDimensional, Private ];
+
+/// Provenance targets, accumulated during post-processing in TransformHelper
+Property %provenanceTarget [ MultiDimensional, Private ];
 
 /// Transforms an SDA stream (Container or SDA class) to the specified FHIR version. Returns an instance of this class
 /// which contains a "bundle" property. That property will contain a FHIR Bundle with all the resources
@@ -65,7 +79,6 @@ ClassMethod TransformStream(stream As %Stream.Object, SDAClassname As %String, f
 ClassMethod TransformObject(source, fhirVersion As %String, patientId As %String = "", encounterId As %String = "") As HS.FHIR.DTL.Util.API.Transform.SDA3ToFHIR
 {
 	set schema = ##class(HS.FHIRServer.Schema).LoadSchema(fhirVersion)
-	//It creates a new instance of the transformation class 
 	set transformer = ..%New(schema)
 	
 	//SDA gets patient and encounter id and Container only gets patient id
@@ -92,21 +105,52 @@ Method TransformContainer(source As HS.SDA3.Container, patientId As %String = ""
 		$$$ThrowStatus($$$ERROR($$$GeneralError, "Multiple Containers cannot be transformed consecutively. This API only supports single patient context."))
 	}
 	
+	Set ..idMap = {}
+	Set currentPatientId = ""
+	set containerClasses = ##class(%ListOfObjects).%New()
+	for {
+		// gotObject = 1 means the call returned an SDA3 object.
+		// gotObject = 0 means the call incurred an error, or
+		//  the call got only the ending </Container> tag (no
+		//  more SDA3 objects to return).
+		set gotObject = source.GetNextSDA(.sdaType, .sdaObj, .tSC)
+		
+		// Throw (abort the entire transform of the Container) if an error was incurred.
+		$$$ThrowOnError(tSC)
+		
+		// Simply quit the loop if we just ran out of SDA3 to parse.
+		if 'gotObject quit
+		
+		if sdaObj.SdaID '= ""{
+			if $CLASSNAME(sdaObj) = "HS.SDA3.Patient"{
+				set currentPatientId = sdaObj.SdaID
+			}
+			do ..idMap.%Set(sdaObj.SdaID, sdaObj.SdaID)
+
+			set DTL = ..GetDTL(sdaObj,,)
+			set targetType = $classmethod(DTL, "GetTargetType")
+			do ..typeMap.%Set(sdaObj.SdaID, $PIECE(targetType,".",*))
+		}
+		$$$ThrowOnError(containerClasses.Insert(sdaObj))
+	}
 	if patientId '= "" {
 		set ..%patientId = patientId
 		set ..%resourceIds("Patient") = patientId
+		do ..idMap.%Set(currentPatientId,patientId)
 	}
-	
-	while source.GetNextSDA(.sdaType, .sdaObj, .tSC) {
-		$$$ThrowOnError(tSC)
-		
+
+	for{
+		set sdaObj = containerClasses.GetNext(.key)
+		quit:key=""
 		do ..TransformHelper(sdaObj)
 	}
 	
+	do ..ProcessProvenanceSetAsideQueue()
+
 	return $this
 }
 
-/// Transforms an individual SDA object to FHIR. Returns an instance of this class
+/// Transforms an SDA object to FHIR. Returns an instance of this class
 /// which contains a "bundle" property. That property will contain a FHIR Bundle with all the resources
 /// generated during the transformation, and with all references resolved. 
 /// @API.Method
@@ -128,6 +172,35 @@ Method TransformSDA(source As HS.SDA3.SuperClass, patientId As %String = "", enc
 	return $this
 }
 
+/// Transforms an SDA datatype to FHIR, which may or may not be a subclass of HS.SDA3.SuperClass. Because of this,
+/// a target resource type must be provided. If no transformation from the SDA datatype to the given resource type,
+/// no action will be taken. Returns an instance of this class
+/// which contains a "bundle" property. That property will contain a FHIR Bundle with all the resources
+/// generated during the transformation, and with all references resolved. 
+/// @API.Method
+/// @Argument	source			SDA object
+/// @Argument	targetType		FHIR resource type to create from the provided input
+/// @Argument	patientId		(optional) FHIR resource id to be assigned to the Patient resource
+/// @Argument	encounterId		(optional) FHIR resource id to be assigned to the Encounter resource, if not transforming a Container
+Method TransformDatatype(source As HS.SDA3.DataType, targetType As %String, patientId As %String = "", encounterId As %String = "") As HS.FHIR.DTL.Util.API.Transform.SDA3ToFHIR
+{
+	if patientId '= "" {
+		set ..%patientId = patientId
+		set ..%resourceIds("Patient") = patientId
+	}
+	if encounterId '= "" {
+		set ..%resourceIds("Encounter") = encounterId
+	}
+	
+	if ..schema.IsValidResourceType(targetType) {
+		do ..TransformHelper(source, targetType)
+	}
+	else {
+		$$$ThrowError($$$GeneralError, "Not implemented")
+	}
+	return $this
+}
+
 /// Resets this transformer object to its initial state.
 /// @API.Method
 Method Reset()
@@ -141,56 +214,520 @@ Method Reset()
 }
 
 /// Helper method for the transformation
-Method TransformHelper(source As HS.SDA3.SuperClass) [ Internal, Private ]
+Method TransformHelper(source As HS.SDA3.SuperClass, targetType As %String = "") [ Internal, Private ]
 {
-	//determine the appropriate Data Transformation Logic (DTL) class for the given source object.
-	set DTL = ..GetDTL(source)
+	set DTL = ..GetDTL(source,, targetType)
 	quit:(DTL="")
-	
-	//creates a new instance of the target FHIR resource class based on the determined DTL class.
 	set aux("transformer") = $this
-	//It invokes the Transform method of the DTL class to transform the source object into the target FHIR resource.
 	set target = $classmethod($classmethod(DTL, "GetTargetType"), "%New")
 	$$$ThrowOnError($classmethod(DTL, "Transform", source, .target, .aux))
 
-	//It calls the AddResource method to add the transformed resource to the FHIR Bundle.
-	// It captures the reference to the added resource.
-	set reference = ..AddResource(source, target)
-
-	//If the source object is of type "HS.SDA3.Medication" and the FHIR version is "vSTU3," 
-	// it performs additional processing specific to medication administration.
-	if (source.%ClassName(1) = "HS.SDA3.Medication") && (..fhirVersion = "vSTU3") {
-		//if the target resource is of type "MedicationDispense."
-		if target.resourceType = "MedicationDispense" {
-			if (target.authorizingPrescription.Count() > 0) && (target.authorizingPrescription.GetAt(1).reference '= "") {
-				//If so, it retrieves information about the authorizing prescription and medication request.
-				set medicationRequestReference = target.authorizingPrescription.GetAt(1)
-				set medicationRequestId = $select((medicationRequestReference.reference [ "urn:uuid:"):$piece(medicationRequestReference.reference, "urn:uuid:", *), 1:$piece(medicationRequestReference.reference, "/", *))
-				set medicationRequestJson = ..ResourceLookup("MedicationRequest", medicationRequestId)
-				if medicationRequestJson '= "" {
-					set medicationReference = $classmethod("HS.FHIR.DTL." _ ..fhirVersion _ ".Model.Base.Reference", "%New")
-					set medicationReference.reference = medicationRequestJson.medicationReference.reference
-				}
-			}
+	if (source.%ClassName(1) = "HS.SDA3.Vaccination") {
+		$$$ThrowOnError(..CreateImmunizationsFromAdministrations(source, target, .aux))
+		quit
+	}
+	
+	if (source.%ClassName(1) = "HS.SDA3.RadOrder") {
+		if (target.resourceType = "DiagnosticReport") {
+			$$$ThrowOnError(..AppendAdditionalCategory(source,target,.aux,"LP29684-5","http://loinc.org","Radiology","Radiology","vR4"))
+			quit
 		}
-		else {
-			set medicationReference = target.medicationReference
-			set medicationRequestReference = reference
-		}
-		//It invokes medication administration handling logic.
-		//It iterates over the responses and updates medication references as needed.
+	}
 
+	if (source.%ClassName(1) = "HS.SDA3.OtherOrder") {
+		if (target.resourceType = "DiagnosticReport") {
+			$$$ThrowOnError(..AppendAdditionalCategory(source,target,.aux,"LP7839-6","http://loinc.org","Pathology","Pathology","vR4"))
+			quit
+		}
+	}
+
+	if (source.%ClassName(1) = "HS.SDA3.ObservationGroup") {
+		$$$ThrowOnError(..ProcessObservationComponents(source, target, .aux))
+		quit
+	}
+	
+	if (source.%ClassName(1) = "HS.SDA3.Provenance") {
+		$$$ThrowOnError(..ProcessProvenance(source, target, .aux))
+		quit
+	}
+
+	if (source.%ClassName(1) = "HS.SDA3.OralExplanationOfBenefit") {
+		$$$ThrowOnError(..ProcessOralExplanationOfBenefit(source, target, .aux))
+		quit
+	}
+	
+	set reference = ..AddRootResource(source, target)
+	quit:reference=""
+	
+	if ((source.%ClassName(1) '= "HS.SDA3.Provenance") && $classmethod(source.%ClassName(1),"%Extends","HS.SDA3.SuperClass")) {
+		$$$ThrowOnError(..ProcessProvenanceTargets(source, reference.reference))
+	}
+
+	if (source.%ClassName(1) = "HS.SDA3.Medication") &&
+			((target.resourceType = "MedicationDispense") || (target.resourceType = "MedicationRequest")) {
+		if target.resourceType = "MedicationRequest" {
+			set aux("MedicationRequestReference") = reference
+		}
+		
 		$$$ThrowOnError(##class(HS.FHIR.DTL.Util.SDA3.Handler.Medication).MedicationAdministration(source, .responses, .aux))
 		for i=1:1:responses.Count() {
-			if $get(medicationReference) '= "" {
-				set responses.GetAt(i).medicationReference = medicationReference
-			}
-			if $get(medicationRequestReference) '= "" {
-				set responses.GetAt(i).prescription = medicationRequestReference
-			}
-			//It adds the medication administration resource to the Bundle.
 			do ..AddResource(source.Administrations.GetAt(i), responses.GetAt(i))
 		}
+	}
+		
+	if (source.%ClassName(1) = "HS.SDA3.QuestionnaireResponse") {
+		$$$ThrowOnError(..ProcessQuestionnaireResponse(source, target, .aux))
+		quit
+	}
+}
+
+/// Utility method to append an additional category object to the target resource's category list.
+/// One of <var>target</var> or <var>resourceJson</var> must be provided.
+/// @Inputs
+/// source			SDA object which created this resource
+/// target			Object model version of the resource
+/// aux				Auxiliary value
+/// pCode			Value for category[n].coding[n].code
+/// pSystem			Value for category[n].coding[n].system
+/// pDisplay		Value for category[n].coding[n].display
+/// pText			Value for category[n].text
+/// pFhirVersion	Version of FHIR output to append a category
+Method AppendAdditionalCategory(source As HS.SDA3.SuperClass, target As %RegisteredObject, ByRef aux, pCode As %String, pSystem As %String, pDisplay As %String, pText As %String, pFhirVersion As %String) As %Status
+{
+	set tSC = $$$OK
+	try {
+		set configuredFhirVersion = ##class(HS.FHIR.DTL.Util.Package).GetConfiguredSchemaName(aux("transformer").fhirVersion)
+		if (configuredFhirVersion = pFhirVersion) {
+			set category=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Datatype.CodeableConcept","%New")
+			set category.coding = ""
+			set category.text = pText
+			set coding=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Datatype.Coding","%New")
+			set coding.system=pSystem
+			set coding.code=pCode
+			set coding.display=pDisplay
+			do category.coding.Insert(coding)
+			do target.category.Insert(category)
+		}
+		do ..AddRootResource(source, target)
+	}
+	catch ex {
+		set tSC = ex.AsStatus()
+	}
+	quit tSC
+}
+
+/// Creates Immunization resources based on Administrations within the inbound SDA3 Vaccination.
+/// An Immunization resource will be created for each Administration in the SDA. 
+/// If there are no Administrations, no Immunization resource will be created.
+/// If any one of the resources fail validation, no resources will be created for this streamlet.
+Method CreateImmunizationsFromAdministrations(source As HS.SDA3.Vaccination, target As %RegisteredObject, ByRef aux) As %Status
+{
+	set tSC = $$$OK
+	try {
+		set configuredFhirVersion = ##class(HS.FHIR.DTL.Util.Package).GetConfiguredSchemaName(aux("transformer").fhirVersion)
+		if (source.Administrations.Count() > 0) {
+			for i=1:1:source.Administrations.Count() {
+				set administration = source.Administrations.GetAt(i)
+				set DTL = aux("transformer").GetDTL(administration, "HS.FHIR.DTL.SDA3." _ configuredFhirVersion _ ".Administration.Immunization")
+				if (DTL = "") {
+					$$$ThrowStatus($$$ERROR($$$GeneralError, "DTL for transforming HS.SDA3.Administration to FHIR Immunization not found"))
+				}
+				set currentTarget = target.%ConstructClone()
+				$$$ThrowOnError($classmethod(DTL, "Transform", administration, .currentTarget, .aux))
+				do ..AddResource(source, currentTarget)
+			}
+		} else {
+			do ..AddRootResource(source, target)
+		}
+	}
+	catch ex {
+		set tSC = ex.AsStatus()
+	}
+	quit tSC
+}
+
+/// If an observation in the Observation.component[x] array matches on observation code: Observation.component[x].code.code = Observation.code.code:
+///     - Copy the valueQuantity property from the component array to the top-level: Observation.component[x].valueQuantity --> Observation.valueQuantity
+///     - Remove the matching redundant component from the component array
+Method ProcessObservationComponents(source As HS.SDA3.Vaccination, target As %RegisteredObject, ByRef aux) As %Status
+{
+	set tSC = $$$OK
+	try {
+		// get top-level observation code and coding system
+		set codingSystem = ""
+		set codingCode = ""
+		if ($IsObject(target.code) && (target.code.coding.Count()>0)) {
+			set codingSystem = target.code.coding.GetAt(1).system
+			set codingCode = target.code.coding.GetAt(1).code
+		}
+		if $IsObject(target.component) {
+			set key = ""
+			for {
+				set component = target.component.GetNext(.key)
+				quit:key=""
+				set coding = component.code.coding.GetAt(1)							
+				if (coding.code = codingCode) && (coding.system = codingSystem) {
+					// copy property valueQuantity from component to top-level
+					if $IsObject(component.valueQuantity) {
+						set target.valueQuantity = component.valueQuantity
+					}
+					// remove the component that matched the top-level observation code
+					do target.component.RemoveAt(key)
+				}
+			}			
+		}
+		do ..AddRootResource(source, target)						
+	}
+	catch ex {
+		set tSC = ex.AsStatus()
+	}
+	quit tSC
+}
+
+/// Helper method to process answers within items. Answers can contain multiple items
+/// US Core requirements require valueString, valueDecimal, valueCoding and item to be filled out. 
+Method HelperAnswerProcess(configuredFhirVersion As %String, source As %Library.DynamicObject) As HS.FHIR.DTL.vR4.Model.Element.QuestionnaireResponse.item.answer
+{
+	set tSC = $$$OK
+	try {
+		set targetAnswer=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Element.QuestionnaireResponse.item.answer","%New")
+		set targetAnswer.id = source.id
+		set targetAnswer.valueString = source.valueString
+		set targetAnswer.valueDecimal = source.valueDecimal
+		if source.valueCoding '= "" {
+			set targetAnswer.valueCoding = ""
+			set targetCoding=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Datatype.Coding","%New")
+			set targetCoding.code = source.valueCoding.code
+			set targetCoding.display = source.valueCoding.display
+			set targetCoding.system = source.valueCoding.system
+			set targetAnswer.valueCoding = targetCoding
+		}
+		if source.item '= "" {
+			set iter= source.item.%GetIterator() 
+			while iter.%GetNext(.key, .value) {
+				set targetItemElement = ..HelperItemProcess(configuredFhirVersion, value)
+				do targetAnswer.item.Insert(targetItemElement)							
+			}
+		}
+		return targetAnswer
+	}
+	catch ex {
+		set tSC = ex.AsStatus()
+	}
+	quit tSC
+}
+
+/// Helper method to process item fields. Items can contain multiple items, and answers
+Method HelperItemProcess(configuredFhirVersion As %String, source As %Library.DynamicObject) As HS.FHIR.DTL.vR4.Model.Element.QuestionnaireResponse.item.answer
+{
+	set tSC = $$$OK
+	try {
+		set targetItem=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Element.QuestionnaireResponse.item","%New")
+		set targetItem.linkId = source.linkId
+		set targetItem.text = source.text
+		set targetItem.id = source.id
+		if source.answer'= "" {
+			set iter= source.answer.%GetIterator() 
+			while iter.%GetNext(.key, .value) {
+				// Only populate answer field if valueString,valueDecimal, or valueCoding is populated or there is another item within answer as US CORE requirements
+				if ((value.valueString '= "") || (value.valueDecimal '= "") || (value.valueCoding '= "") || (value.item '= "")) {
+					set targetAnswer = ..HelperAnswerProcess(configuredFhirVersion, value)
+					do targetItem.answer.Insert(targetAnswer)		
+				}					
+			}
+		}
+		// Use recursion to process items within items
+		if source.item '= "" {
+			set iter= source.item.%GetIterator() 
+			while iter.%GetNext(.key, .value) {
+				set targetItemElement = ..HelperItemProcess(configuredFhirVersion, value)
+				do targetItem.item.Insert(targetItemElement)							
+			}
+		}
+		return targetItem
+	}
+	catch ex {
+		set tSC = ex.AsStatus()
+	}
+	quit tSC
+}
+
+Method ProcessQuestionnaireResponse(source As HS.SDA3.QuestionnaireResponse, target As %RegisteredObject, ByRef aux) As %Status
+{
+	set tSC = $$$OK
+	try {
+		// get configuredFhirVersion
+		set configuredFhirVersion = ##class(HS.FHIR.DTL.Util.Package).GetConfiguredSchemaName(aux("transformer").fhirVersion)
+		
+		// map Tags to tag(s)
+		if (source.IsDefined("Tags") && (source.Tags.Count() > 0)) {
+			set target.meta = ""
+			set targetMeta=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Base.Meta","%New")
+			for i=1:1:source.Tags.Count() {
+				set sourceTag = source.Tags.GetAt(i)
+				set targetTag=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Datatype.Coding","%New")
+				set targetTag.code = sourceTag.Code
+				set targetTag.display = sourceTag.Description 
+				set targetTag.system = sourceTag.SDACodingStandard 
+				do targetMeta.tag.Insert(targetTag)	
+			}
+			set target.meta = targetMeta
+		}
+		
+		//set QuestionnaireName and QuestionnaireUri to _questionnaire (extension property) elements only if QuestionnaireName field exists
+		if ((source.QuestionnaireName'= "") && (source.QuestionnaireUri'= "")) {
+			set target.extension = ""
+			set questionnaireURIExtension=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Base.Extension","%New")
+			//Questionnaire URI Extension 
+			set questionnaireURIExtension.url = "http://hl7.org/fhir/us/core/StructureDefinition/us-core-extension-questionnaire-uri"
+			set questionnaireURIExtension.valueUri = source.QuestionnaireUri
+			do target.extension.Insert(questionnaireURIExtension)
+			set questionnaireDisplayExtension=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Base.Extension","%New")
+			//Questionnaire Display valueString Extension
+			set questionnaireDisplayExtension.url = "http://hl7.org/fhir/StructureDefinition/display"
+			set questionnaireDisplayExtension.valueString = source.QuestionnaireName
+			do target.extension.Insert(questionnaireDisplayExtension)			
+		}
+		// if questionnaireName/Uri is null, map questionnaire from QuestionnaireUri
+		else {
+			set target.questionnaire = source.QuestionnaireUri
+		} 
+		
+		//set Items to item
+		if source.Items'= "" {
+			set itemArray = {}.%FromJSON(source.Items)
+			for i=0:1:itemArray.%Size()-1 {
+				set item = itemArray.%Get(i)
+				set targetItem=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Element.QuestionnaireResponse.item","%New")
+				set targetItem.linkId = item.linkId
+				set targetItem.text = item.text
+				set targetItem.id = item.id
+				// item can contain multiple items
+				if item.item'="" {
+					set iter= item.item.%GetIterator() 
+					while iter.%GetNext(.key, .value) {
+						set targetItemElement = ..HelperItemProcess(configuredFhirVersion, value)
+						do targetItem.item.Insert(targetItemElement)							
+					}
+				}
+				do target.item.Insert(targetItem)	
+			}
+		}
+		do ..AddResource(source, target)						
+	}
+	catch ex {
+		set tSC = ex.AsStatus()
+	}
+	quit tSC
+}
+
+Method ProcessOralExplanationOfBenefit(source As HS.SDA3.OralExplanationOfBenefit, target As %RegisteredObject, ByRef aux) As %Status
+{
+	set tSC = $$$OK
+	try {
+		set configuredFhirVersion = ##class(HS.FHIR.DTL.Util.Package).GetConfiguredSchemaName(aux("transformer").fhirVersion)
+		// build informationSequence array for item from supportingInfo[additionalbodysite] repetitions with supportingInfo[additionalbodysite].sequence
+		set informationSequence=##class(%ListOfDataTypes).%New()
+			if $IsObject(target.supportingInfo) {
+			set key = ""
+			for {
+				set supportingInfo = target.supportingInfo.GetNext(.key)
+				quit:key=""
+				set coding = supportingInfo.category.coding.GetAt(1)							
+				if (coding.code = "additionalbodysite"){
+					set sequence = supportingInfo.sequence
+					do informationSequence.Insert(sequence)
+				}
+			}			
+		}
+		
+		// insert informationSequence in item matching additionalbodysite in
+		if $IsObject(target.item) {
+			for {
+				set item = target.item.GetNext(.key)
+				quit:key=""
+				set bodySite = item.bodySite.coding.GetAt(1)	
+				if (bodySite.code = "additionalbodysite"){
+					set targetItem=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Element.ExplanationOfBenefit.item","%New")
+					set targetItem = item
+					set targetItem.informationSequence = informationSequence
+					do target.item.RemoveAt(key)
+					do target.item.Insert(targetItem)
+				}
+			}			
+		}
+		do ..AddResource(source, target)						
+	}
+	catch ex {
+		set tSC = ex.AsStatus()
+	}
+	quit tSC
+}
+
+/// Map SourceFormat to PDex extension, map Agents, initialize target array to be populated in TransformContainer
+/// Store provenance resource in ..%provenance (set-aside queue), to be added to output bundle later when we are able
+/// to reconstitute target array from ..%provenanceTarget in TransformContainer.
+Method ProcessProvenance(source As HS.SDA3.Provenance, target As %RegisteredObject, ByRef aux) As %Status
+{
+	set tSC = $$$OK
+	try {
+		// get configuredFhirVersion
+		set configuredFhirVersion = ##class(HS.FHIR.DTL.Util.Package).GetConfiguredSchemaName(aux("transformer").fhirVersion)
+		// create an empty target array.  it will be populated in TransformContainer as pos-processing
+		set target.target=""
+		// map SourceFormat to entity.extension
+		if (source.IsDefined("SourceFormat") && (source.SourceFormat.Code '= "")) {
+			set target.entity=""
+			set provenanceEntity=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Element.Provenance.entity","%New")
+			set provenanceEntity.role="source"
+			set whatReference = $classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Base.Reference","%New")
+			set whatReference.display="source"
+			if (configuredFhirVersion="vR4") {
+				set provenanceEntity.what=whatReference
+			} else {
+				set provenanceEntity.whatReference=whatReference
+			}
+			set provenanceEntity.extension=""
+			set provenanceEntityExtension=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Base.Extension","%New")
+ 			set provenanceEntityExtension.url="http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/ProvenanceSourceFrom"
+			set valueCodeableConcept=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Datatype.CodeableConcept","%New")
+			set valueCodeableConcept.coding=""
+			set coding=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Datatype.Coding","%New")
+			set coding.system=source.SourceFormat.SDACodingStandard
+			set coding.code=source.SourceFormat.Code
+			set coding.display=source.SourceFormat.Description
+			do valueCodeableConcept.coding.Insert(coding)
+			set provenanceEntityExtension.valueCodeableConcept=valueCodeableConcept
+			do provenanceEntity.extension.Insert(provenanceEntityExtension)
+			do target.entity.Insert(provenanceEntity)
+		}
+		// map Agents to agent(s)		
+		if (source.IsDefined("Agents") && (source.Agents.Count() > 0)) {
+			set target.agent=""
+			for i=1:1:source.Agents.Count() {
+				#dim provenanceAgent as HS.SDA3.ProvenanceAgent
+				set provenanceAgent = source.Agents.GetAt(i)
+				set agent=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Element.Provenance.agent","%New")
+				if ((configuredFhirVersion="vR4")&&($IsObject(provenanceAgent.Type))) {
+					set type=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Datatype.CodeableConcept","%New")
+					set type.coding=""
+					set coding=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Datatype.Coding","%New")
+					set coding.system=provenanceAgent.Type.SDACodingStandard
+					set coding.code=provenanceAgent.Type.Code
+					set coding.display=provenanceAgent.Type.Description
+					do type.coding.Insert(coding)
+					set agent.type=type
+				}
+				// transform HS.SDA3.ProvenanceAgent:CareProvider -> Practitioner reference
+				if (($IsObject(provenanceAgent.CareProvider)) && (provenanceAgent.CareProvider.Code '= "")) {
+					set DTL = aux("transformer").GetDTL(provenanceAgent.CareProvider, "HS.FHIR.DTL.SDA3." _ configuredFhirVersion _ ".CodeTableDetail.CareProvider.Practitioner")
+					if (DTL = "") {
+						$$$ThrowStatus($$$ERROR($$$GeneralError, "DTL for transforming HS.SDA3.CodeTableDetail.CareProvider to FHIR Practitioner not found"))
+					}
+					set practitioner=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Resource.Practitioner","%New")
+					$$$ThrowOnError($classmethod(DTL, "Transform", provenanceAgent.CareProvider, .practitioner, .aux))
+					#dim practitioner as HS.FHIR.DTL.vR4.Model.Resource.Practitioner
+					set practitionerJSON=practitioner.ToJSON()
+					set practitionerReference=..AddResource(provenanceAgent.CareProvider, practitioner)
+					if (configuredFhirVersion="vR4") {
+						set agent.who=practitionerReference
+					} else {
+						set agent.whoReference=practitionerReference
+					}
+				}
+				// transform HS.SDA3.ProvenanceAgent:Organization -> Organization reference 
+				if (($IsObject(provenanceAgent.Organization)) && (provenanceAgent.Organization.Code '= "")) {
+					set DTL = aux("transformer").GetDTL(provenanceAgent.Organization, "HS.FHIR.DTL.SDA3." _ configuredFhirVersion _ ".CodeTableDetail.Organization.Organization")
+					if (DTL = "") {
+						$$$ThrowStatus($$$ERROR($$$GeneralError, "DTL for transforming HS.SDA3.CodeTableDetail.Organization to FHIR Organization not found"))
+					}
+					set organization=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Resource.Organization","%New")
+					$$$ThrowOnError($classmethod(DTL, "Transform", provenanceAgent.Organization, .organization, .aux))
+					#dim organization as HS.FHIR.DTL.vR4.Model.Resource.Organization
+					set organizationJSON=organization.ToJSON()
+					set organizationReference=..AddResource(provenanceAgent.Organization, organization)
+					if (configuredFhirVersion="vR4") {
+						set agent.who=organizationReference
+					} else {
+						set agent.whoReference=organizationReference
+					}
+				}
+				// transform HS.SDA3.ProvenanceAgent:OnBehalfOfOrganization -> Organization reference 
+				if (($IsObject(provenanceAgent.OnBehalfOfOrganization)) && (provenanceAgent.OnBehalfOfOrganization.Code '= "")) {
+					set DTL = aux("transformer").GetDTL(provenanceAgent.OnBehalfOfOrganization, "HS.FHIR.DTL.SDA3." _ configuredFhirVersion _ ".CodeTableDetail.Organization.Organization")
+					if (DTL = "") {
+						$$$ThrowStatus($$$ERROR($$$GeneralError, "DTL for transforming HS.SDA3.CodeTableDetail.Organization to FHIR Organization not found"))
+					}
+					set organization=$classmethod("HS.FHIR.DTL." _ configuredFhirVersion _ ".Model.Resource.Organization","%New")
+					$$$ThrowOnError($classmethod(DTL, "Transform", provenanceAgent.OnBehalfOfOrganization, .organization, .aux))
+					set organizationReference=..AddResource(provenanceAgent.OnBehalfOfOrganization, organization)
+					if (configuredFhirVersion="vR4") {
+						set agent.onBehalfOf=organizationReference
+					} else {
+						set agent.onBehalfOfReference=organizationReference
+					}
+				}
+				do target.agent.Insert(agent)
+			}
+		}
+		// stash provenance resource into set-aside queue.  still needs target(s) to be valid
+		// it is considered an invalid data condition for a Provenance streamlet to have ExternalId = "", FHIR-to-SDA3 transformation
+		// assigns a GUID to each ingested provenance resource.  It is possible to create invalid provenance streamlets using SDAIn 
+		if source.ExternalId '= "" {
+			set provenanceGUID = source.ExternalId
+		}
+		else {
+			set provenanceGUID = $system.Util.CreateGUID()
+		}
+		set ..%provenance(provenanceGUID)=target
+		set ..%provenance(provenanceGUID,"Source")=source
+	}
+	catch ex {
+		set tSC = ex.AsStatus()
+	}
+		
+	quit tSC
+}
+
+/// All streamlets that are target(s) of Provenance contain their provenance references in property ProvenanceIds
+/// Iterate these GUIDs and set ..%provenanceTargets(GUID,reference)
+Method ProcessProvenanceTargets(source As HS.SDA3.SuperClass, reference As %String) As %Status
+{
+	set tSC = $$$OK
+	try {
+		if (source.ProvenanceIds.Count() > 0) {
+			for i=1:1:source.ProvenanceIds.Count() {
+				set provenanceGUID=source.ProvenanceIds.GetAt(i)
+				set ..%provenanceTarget(provenanceGUID,reference)=""
+			}
+		}
+	}
+	catch ex {
+		set tSC = ex.AsStatus()
+	}
+	quit tSC
+}
+
+/// Process provenance streamlets in the set-aside queue: ..%provenance, and populate "target" using references from ..%provenanceTarget 
+Method ProcessProvenanceSetAsideQueue()
+{
+	// Process provenance streamlets in the set-aside queue: ..%provenance, and populate "target" using references from ..%provenanceTarget 
+	set guid=""
+	for {
+		set guid=$order(..%provenance(guid))
+		quit:guid=""
+		set provenanceResource=..%provenance(guid)
+		set provenanceSource=..%provenance(guid,"Source")
+		
+		set reference=""
+		for {
+			set reference=$order(..%provenanceTarget(guid,reference))
+			quit:reference=""
+			set targetReference = $classmethod("HS.FHIR.DTL." _ ..%fhirVersion _ ".Model.Base.Reference", "%New")
+			set targetReference.reference=reference
+			do provenanceResource.target.Insert(targetReference)
+		}
+		set provenanceReference = ..AddResource(provenanceSource,provenanceResource)
 	}
 }
 
@@ -199,28 +736,33 @@ Method TransformHelper(source As HS.SDA3.SuperClass) [ Internal, Private ]
 /// for top level transformations can be viewed in the FHIR annotations, under the Container
 /// mappings. This can be overriden if different logic is desired.
 /// @API.Overrideable
-Method GetDTL(source As HS.SDA3.DataType, DTL As %Dictionary.Classname = "") As %Dictionary.Classname
+Method GetDTL(source As HS.SDA3.DataType, DTL As %Dictionary.Classname = "", targetType As %String = "") As %Dictionary.Classname
 {
+	set useCustom = (##class(HS.FHIR.DTL.Util.API.ExecDefinition).GetCustomDTLPackage() '= "")
 	if DTL '= "" {
-		return DTL
+		return $select(useCustom: ##class(HS.FHIR.DTL.Util.API.ExecDefinition).GetDTLPackageAndClass(DTL),
+						1:DTL)
 	}
 	set aux("transformer") = $this
-	//It extracts the class name of the source object's root class (SDA class) and stores it in SDAClass.
 	set SDAClass = source.%ClassName(1)
-	//It enters a loop to iterate over possible DTL classes for transformation.
 	for {
-		//Within the loop, it sequentially checks each DTL class associated with the given SDA class and FHIR version.
 		set DTL = $order(^HS.XF.Transform("SDA3", ..%fhirVersion, SDAClass, DTL))
 		quit:DTL=""
-		//It retrieves the condition associated with the current DTL class from the transformation index (^HS.XF.Transform) 
-		// based on the SDA class, FHIR version, and DTL class.
-		set condition = ^HS.XF.Transform("SDA3", ..%fhirVersion, SDAClass, DTL)
-		//If a condition is found and evaluates to true when executed dynamically, it returns the name of the current DTL class.
-		if (condition '= "") && $xecute("(source, aux) return (" _ condition _ ")", source, .aux) {
-			return DTL
+		
+		if targetType '= "" {
+			if $find(DTL, targetType, $length(DTL) - $length(targetType)) = ($length(DTL) + 1) { //Check targetType is the last thing in DTL
+				return $select(useCustom: ##class(HS.FHIR.DTL.Util.API.ExecDefinition).GetDTLPackageAndClass(DTL),
+							1:DTL)
+			}	
+		}
+		else {
+			set condition = ^HS.XF.Transform("SDA3", ..%fhirVersion, SDAClass, DTL)
+			if (condition '= "") && $xecute("(source, aux) return (" _ condition _ ")", source, .aux) {
+				return $select(useCustom: ##class(HS.FHIR.DTL.Util.API.ExecDefinition).GetDTLPackageAndClass(DTL),
+								1:DTL)
+			}
 		}
 	}
-	//If no matching DTL class is found, it exits the loop and returns an empty string.
 	return ""
 }
 
@@ -238,13 +780,10 @@ Method IsDuplicate(resource As %DynamicObject, id As %String) As HS.FHIR.DTL.vR4
 		do $system.Encryption.SHA1HashInput(resource.%ToJSON())
 		set hash = $system.Encryption.Base64Encode($system.Encryption.SHA1HashResult())
 		
-		//checks if the computed hash already exists in the resource index (..%resourceIndex) to determine if the resource is a duplicate.
 		if $data(..%resourceIndex("hash", hash)) {
-			//returns a reference to the original resource using the CreateReference method.
 			return ..CreateReference(resource.resourceType, ..%resourceIndex("hash", hash))
 		}
 		
-		//If the hash doesn't exist in the resource index, it adds the hash to the index and associates it with the resource's ID.
 		set ..%resourceIndex("hash", hash) = id
 	}
 	return ""
@@ -256,59 +795,68 @@ Method IsDuplicate(resource As %DynamicObject, id As %String) As HS.FHIR.DTL.vR4
 /// @API.Overrideable
 Method ResourceLookup(resourceType As %String, id As %String) As %DynamicObject [ Private ]
 {
-	//first checks if the resource index (..%resourceIndex) contains the specified resource type and ID.
 	if $data(..%resourceIndex(resourceType, id)) {
-		//If the resource is found in the index, it returns the corresponding resource object.
 		return ..%resourceIndex(resourceType, id)
 	}
 	else {
-		//If the resource is not found in the index, it returns an empty string.
 		return ""
 	}
+}
+
+Method AddRootResource(source As HS.SDA3.SuperClass, resource As %RegisteredObject = "", ByRef resourceJson As %DynamicObject = "") As HS.FHIR.DTL.vR4.Model.Base.Reference [ Internal ]
+{
+	return ..AddResource(source, resource, .resourceJson, 1)
 }
 
 /// Ensures the resource is valid FHIR, adds the resource to the output Bundle,
 /// and returns a reference to that resource. Will also output the resource as a
 /// %DynamicObject.
-Method AddResource(source As HS.SDA3.SuperClass, resource As %RegisteredObject, Output resourceJson As %DynamicObject) As HS.FHIR.DTL.vR4.Model.Base.Reference [ Internal ]
-{ 
-	//converts the provided resource object to a JSON representation
-	set resourceJson = ##class(%DynamicObject).%FromJSON(resource.ToJSON())
+/// @Inputs
+/// source			SDA object which created this resource
+/// resource		Object model version of the resource
+/// resourceJson	%DynamicObject version of the resource
+/// One of <var>resource</var> or <var>resourceJson</var> must be provided. If both are provided,
+/// the %DynamicObject representation will be given precedence 
+Method AddResource(source As HS.SDA3.SuperClass, resource As %RegisteredObject = "", ByRef resourceJson As %DynamicObject = "", isRootSource As %Boolean = 0) As HS.FHIR.DTL.vR4.Model.Base.Reference [ Internal ]
+{
+	if '$isobject(resourceJson) {
+		set resourceJson = ##class(%DynamicObject).%FromJSON(resource.ToJSON())
+	}
+	
 	try {
 		do ..%resourceValidator.ValidateResource(resourceJson)
 	} catch ex {
 		do ..HandleInvalidResource(resourceJson, ex)
 		return ""
 	}
-	//It creates a new %DynamicObject to represent a bundle entry.
+	
 	set entry = ##class(%DynamicObject).%New()
-	//Within this entry, it creates a sub-object named request to hold details about the HTTP request to create or update the resource.
 	set entry.request = ##class(%DynamicObject).%New()
 	
 	set id = ..GetId(source, resourceJson)
 	if id '= "" {
-		set resource.id = id
 		set resourceJson.id = id
 	}
 	
 	//Check for an SDA identifier->id mapping to maintain references
+	//Note: Provenance assigns a GUID to ExternalId for internal use, it is not an external id and shouldn't influence id assignment 
 	set sourceIdentifier = ""
-	if resource.resourceType = "Encounter" {
+	if resourceJson.resourceType = "Encounter" {
 		set sourceIdentifier = source.EncounterNumber
 	}
-	elseif source.%Extends("HS.SDA3.SuperClass") {
+	elseif ((source.%Extends("HS.SDA3.SuperClass")) && (resourceJson.resourceType '= "Provenance")) {
 		set sourceIdentifier = source.ExternalId
 	}
 	
 	if id = "" {
-		if (resource.resourceType = "Patient") && (..%patientId '= "") {
+		if (resourceJson.resourceType = "Patient") && (..%patientId '= "") {
 			set id = ..%patientId
 		}
-		elseif $get(..%resourceIds(resource.resourceType)) '= "" {
-			set id = ..%resourceIds(resource.resourceType)
+		elseif $get(..%resourceIds(resourceJson.resourceType)) '= "" {
+			set id = ..%resourceIds(resourceJson.resourceType)
 		}
-		elseif (sourceIdentifier '= "") && $data(..%resourceIds(resource.resourceType, sourceIdentifier)) {
-			set id = ..%resourceIds(resource.resourceType, sourceIdentifier)
+		elseif (sourceIdentifier '= "") && $data(..%resourceIds(resourceJson.resourceType, sourceIdentifier)) {
+			set id = ..%resourceIds(resourceJson.resourceType, sourceIdentifier)
 		}
 		
 		if id '= "" {
@@ -316,46 +864,45 @@ Method AddResource(source As HS.SDA3.SuperClass, resource As %RegisteredObject, 
 			set resourceJson.id = id
 		}
 	}
-	//If the resource already has an ID, it constructs the full URL for the resource based on the base URL 
-	// and resource type and sets the HTTP method to "PUT" to update the resource.
-	if resource.id '= "" {
-		set id = resource.id
-		set entry.fullUrl = $select(..GetBaseURL()'="":..GetBaseURL() _ "/", 1:"") _ resource.resourceType _ "/" _ resource.id
+	
+	if resourceJson.id '= "" {
+		set id = resourceJson.id
+		set entry.fullUrl = $select(..GetBaseURL()'="":..GetBaseURL() _ "/", 1:"") _ resourceJson.resourceType _ "/" _ resourceJson.id
 		set entry.request.method = "PUT"
-		set entry.request.url = resource.resourceType _ "/" _ resource.id
+		set entry.request.url = resourceJson.resourceType _ "/" _ resourceJson.id
 	}
-	//If the resource does not have an ID, it generates a new UUID and constructs the full URL as a URN. 
-	// It sets the HTTP method to "POST" to create a new resource.
 	else {
 		set id = $zconvert($system.Util.CreateGUID(), "L")
 		set entry.fullUrl = "urn:uuid:" _ id
 		set entry.request.method = "POST"
-		set entry.request.url = resource.resourceType
+		set entry.request.url = resourceJson.resourceType
 	}
 	
 	//Save id mappings for later access
-	if resource.resourceType = "Patient" {
+	if resourceJson.resourceType = "Patient" {
 		set ..%patientId = id
 	}
 	elseif sourceIdentifier '= "" {
-		set ..%resourceIds(resource.resourceType, sourceIdentifier) = id
+		set ..%resourceIds(resourceJson.resourceType, sourceIdentifier) = id
 	}
 	
+	if (resourceJson.resourceType = "MedicationRequest") && (..idMap.%Get(source.SdaID) '= ""){
+		set id = ..idMap.%Get(source.SdaID)
+		set resourceJson.id = id
+	}
+
 	set duplicate = ..IsDuplicate(resourceJson, id)
 	if duplicate '= "" {
 		return duplicate
 	}
 	
-	//If the resource is not a duplicate, it indexes the resource in the resource index (..%resourceIndex) for efficient 
-	// lookup during post-processing.
 	//Index for O(1) lookup if needed for post-processing
-	set ..%resourceIndex(resource.resourceType, id) = resourceJson
+	set ..%resourceIndex(resourceJson.resourceType, id) = resourceJson
 	
 	set entry.resource = resourceJson
 	do ..%bundle.entry.%Push(entry)
 	
-	//returns a reference to the added resource using the CreateReference method.
-	return ..CreateReference(resource.resourceType, id)
+	return ..CreateReference(resourceJson.resourceType, id)
 }
 
 /// Returns a reference to the resource generated from the provided source identifier. Predominant
@@ -363,7 +910,6 @@ Method AddResource(source As HS.SDA3.SuperClass, resource As %RegisteredObject, 
 /// @API.Overrideable
 Method GetReference(resourceType As %String, sourceIdentifier As %String) As %String
 {
-	//It checks if an ID exists for the specified resource type in the %resourceIds index.
 	if $get(..%resourceIds(resourceType)) '= "" {
 		return ..CreateReference(resourceType, ..%resourceIds(resourceType))
 	}
@@ -371,7 +917,6 @@ Method GetReference(resourceType As %String, sourceIdentifier As %String) As %St
 	if sourceIdentifier = "" {
 		return ""
 	}
-	//If no ID exists for the specified resource type and source identifier, it generates a new ID using $system.Util.CreateGUID()
 	if '$data(..%resourceIds(resourceType, sourceIdentifier)) {
 		set ..%resourceIds(resourceType, sourceIdentifier) = $zconvert($system.Util.CreateGUID(), "L")
 	}
@@ -386,7 +931,7 @@ Method GetPatientReference() As %String
 	if ..%patientId = "" {
 		set ..%patientId = $zconvert($system.Util.CreateGUID(), "L")
 	}
-	//creates a reference using the CreateReference method with the generated or existing ID and returns it
+	
 	return ..CreateReference("Patient", ..%patientId)
 }
 
@@ -410,23 +955,31 @@ Method GetBaseURL() [ Private ]
 /// @API.Overrideable
 Method HandleInvalidResource(resource As %DynamicObject, exception As %Exception.AbstractException) [ Private ]
 {
+	if resource.resourceType = "Provenance" {
+		return
+	}
 	throw exception
 }
 
-/// Helper method to generate a reference for a given resource type and ID
+/// Overrideable method that allows custom handling of errors in a subtransform DTL. The default behavior
+/// is to throw an exception and exit current transformation.
+/// @API.Overrideable
+Method HandleSubtransformError(status As %Status)
+{
+	throw ##class(%Exception.StatusException).ThrowIfInterrupt(status)
+}
+
+/// Helper method to generate a reference element
 Method CreateReference(resourceType As %String, id As %String) [ Internal ]
 {
-	//It creates a new instance of a reference object based on the FHIR version specified.
-	set reference = $classmethod("HS.FHIR.DTL." _ ..fhirVersion _ ".Model.Base.Reference", "%New")
-	//If the ID provided is a UUID (Universally Unique Identifier), it sets the reference to "urn:uuid:" followed by the ID.
+	set reference = $classmethod("HS.FHIR.DTL." _ ..%fhirVersion _ ".Model.Base.Reference", "%New")
 	if ##class(HS.HC.Util).IsUUID(id) {
 		set reference.reference = "urn:uuid:" _ id
 	}
-	//If the ID is not a UUID, it sets the reference to the resource type concatenated with "/" and the ID.
 	else {
 		set reference.reference = resourceType _ "/" _ id
 	}
-	//returns the created reference object.
+	
 	return reference
 }
 
@@ -453,7 +1006,7 @@ Method bundleGet() [ Internal ]
 			}
 		}
 	}
-	//returns the FHIR bundle containing the transformed resources.
+	
 	return ..%bundle
 }
 
@@ -468,7 +1021,10 @@ Method schemaGet() [ CodeMode = expression, Internal ]
 {
 ..%schema
 }
-// The %OnNew method is a constructor method that initializes a new instance of the class.
+
+/// Override %OnNew to configure the transformer
+/// @Inputs
+/// schema				Instance of HS.FHIRServer.Schema/HS.FHIRMeta.API for the target version of FHIR
 Method %OnNew(schema As HS.FHIRServer.Schema) As %Status [ Private, ServerOnly = 1 ]
 {
 	set ..%schema = schema
@@ -485,18 +1041,14 @@ Method %OnNew(schema As HS.FHIRServer.Schema) As %Status [ Private, ServerOnly =
 ClassMethod GetXFSchemaFromMetadataSet(metadataKey As %String) As %String
 {
 	//Get the base FHIR metadata set to determine the transformations to use
-	set metadataSet = ##class(HS.FHIRServer.FHIRMetadataSet).%OpenId(metadataKey)
-	//iterates through the hierarchy of metadata sets by following the ExtendsKey property until it reaches the base metadata set.
-	while metadataSet.ExtendsKey '= "" {
-		set metadataSet = ##class(HS.FHIRServer.FHIRMetadataSet).%OpenId(metadataSet.ExtendsKey)
-	}
-	//maps the base metadata set key to the corresponding FHIR schema version using a case statement. 
-	// If no match is found, it throws an error.
-	set schema = $case(metadataSet.Key,  "HL7v30":"vSTU3", "HL7v40":"vR4", :"")
+	// NOTE: This should take the schema (metaAPI) object ... but we can easily create another for now
+	#dim metaAPI as HS.FHIRMeta.API = ##class(HS.FHIRMeta.API).getInstance(metadataKey)
+	Set fhirVersion = +$E(metaAPI.FHIRVersion)
+	set schema = $case(fhirVersion,  3:"vSTU3", 4:"vR4", :"")
 	if schema = "" {
 		$$$ThrowStatus($$$ERROR($$$GeneralError, "Transformations not defined for metadata set " _ metadataKey))
 	}
-	//returns the determined FHIR schema version.
+	
 	return schema
 }
 
@@ -513,7 +1065,7 @@ ClassMethod GetTargetResourceList(schemaName As %String, Output resourceList) As
 		if schemaName="" {
 			$$$ThrowStatus($$$ERROR($$$GeneralError, "schemaName not specified"))
 		}
-		//It iterates over the entries in the transformation mapping stored in the global ^HS.XF.Transform("SDA3", schemaName, source, target). 
+		
 		set source = "" for { set source = $order(^HS.XF.Transform("SDA3", schemaName, source), 1) quit:(source = "")
 			set target = "" for { set target = $order(^HS.XF.Transform("SDA3", schemaName, source, target), 1) quit:(target = "")
 				set fhirList($piece(target, ".", *)) = ""
@@ -529,6 +1081,23 @@ ClassMethod GetTargetResourceList(schemaName As %String, Output resourceList) As
 		set tSC = ex.AsStatus()
 	}
 	quit tSC
+}
+
+/// Callback for converting reference variables using SDA ID maps.
+/// Assumes all references in Container must point to ID of existing object
+Method ResolveReference(source As HS.SDA3.Reference)
+{
+	set output = $classmethod("HS.FHIR.DTL." _ ..%fhirVersion _ ".Model.Base.Reference", "%New")
+
+	set fhirId = ..idMap.%Get(source.SdaID)
+	set fhirType = ..typeMap.%Get(source.SdaID)
+	set output.display = source.Description
+	set output.reference = fhirType _ "/" _ fhirId
+
+	if ..%fhirVersion = "vR4"{
+		set output.type = fhirType
+	}
+	return output
 }
 
 }

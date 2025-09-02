@@ -1,5 +1,17 @@
 {
     "objectscript.conn": {
-        "active": true
+        "active": true,
+        "server": "iris",
+        "ns": "CCD"
+    },
+    "intersystems.servers": {
+        "iris": {
+            "webServer": {
+                "scheme": "http",
+                "host": "localhost",
+                "port": 52773
+            },
+            "username": "SuperUser"
+        }
     }
 }

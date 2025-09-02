@@ -416,6 +416,9 @@ Storage Default
 <Value name="85">
 <Value>ProvenanceIds</Value>
 </Value>
+<Value name="86">
+<Value>SdaID</Value>
+</Value>
 </Data>
 <Type>%Storage.Serial</Type>
 }

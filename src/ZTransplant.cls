@@ -57,6 +57,9 @@ Storage Default
 <Value name="16">
 <Value>TransplantPhysician</Value>
 </Value>
+<Value name="17">
+<Value>SdaID</Value>
+</Value>
 </Data>
 <Type>%Storage.Serial</Type>
 }

@@ -164,6 +164,10 @@ Method OnInit() As %Status
 /// the response from the host.
 Method ProcessSDARequest(pSDAStream, pSessionApplication As %String, pSessionId As %String, pPatientResourceId As %String = "") As %Status
 {
+	New %HSIncludeTimeZoneOffsets
+	
+	Set %HSIncludeTimeZoneOffsets = 1
+	
 	Set tSC = $$$OK
 	
 	Try {

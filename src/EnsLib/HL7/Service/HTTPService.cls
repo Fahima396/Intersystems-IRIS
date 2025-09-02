@@ -1,4 +1,4 @@
-/* Copyright (c) 2023 by InterSystems Corporation.
+/* Copyright (c) 2025 by InterSystems Corporation.
    Cambridge, Massachusetts, U.S.A.  All rights reserved.
    Confidential property of InterSystems Corporation. */
 
@@ -18,7 +18,7 @@ Property HTTPResponseMode As %String(VALUELIST = ",CodeOnly,CodeWithACKBody,OKCo
 
 Parameter SETTINGS = "HTTPResponseMode";
 
-Property ReplyStream As %Stream.GlobalCharacter;
+Property ReplyStream As %GlobalCharacterStream;
 
 Property ReplyIOStream As %IO.MetaCharacterStream;
 
@@ -45,7 +45,7 @@ Method OnInit() As %Status
 {
 	#dim tSC As %Status = $$$OK
 	Set tSC=##class(EnsLib.HL7.Service.Standard)$this.OnInit()  Quit:$$$ISERR(tSC) tSC
-	Set ..ReplyStream=##class(%Stream.GlobalCharacter).%New()
+	Set ..ReplyStream=##class(%GlobalCharacterStream).%New()
 	Set ..ReplyStream.Attributes("Content-Type")="text/hl7"
 	Set ..ReplyIOStream=##class(%IO.MetaCharacterStream).%New(..ReplyStream)
 	Set ..ReplyIOStream.Name="HTTP Response"
